@@ -225,8 +225,8 @@ if __name__ == "__main__":
         args.model_weights = default_models[args.model_type]
 
     # set torch options
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
+    #torch.backends.cudnn.enabled = True
+    #torch.backends.cudnn.benchmark = True
 
     # compute depth maps
     run(
