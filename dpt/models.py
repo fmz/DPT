@@ -28,11 +28,12 @@ class DPT(BaseModel):
         self,
         head,
         features=256,
-        backbone="vitb_rn50_384",
+        backbone="vitl16_384",
         readout="project",
         channels_last=False,
         use_bn=False,
         enable_attention_hooks=False,
+        has_depth=False
     ):
 
         super(DPT, self).__init__()
@@ -56,6 +57,7 @@ class DPT(BaseModel):
             hooks=hooks[backbone],
             use_readout=readout,
             enable_attention_hooks=enable_attention_hooks,
+            has_depth_input=has_depth
         )
 
         self.scratch.refinenet1 = _make_fusion_block(features, use_bn)
@@ -122,6 +124,37 @@ class DPTDepthModel(DPT):
         else:
             return inv_depth
 
+class DPTDepthCompletion(DPT):
+    def __init__(
+        self,
+        path=None,
+        non_negative=True,
+        scale=1.0,
+        shift=0.0,
+        invert=False,
+        **kwargs
+    ):
+        kwargs['has_depth'] = True
+        features = kwargs["features"] if "features" in kwargs else 256
+
+        self.scale = scale
+        self.shift = shift
+        self.invert = invert
+
+        head = nn.Sequential(
+            nn.Conv2d(features, features // 2, kernel_size=3, stride=1, padding=1),
+            Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(features // 2, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
+            nn.Conv2d(32, 1, kernel_size=1, stride=1, padding=0),
+            nn.ReLU(True) if non_negative else nn.Identity(),
+            nn.Identity(),
+        )
+
+        super().__init__(head, **kwargs)
+
+        if path is not None:
+            self.load(path)
 
 class DPTSegmentationModel(DPT):
     def __init__(self, num_classes, path=None, **kwargs):

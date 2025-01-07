@@ -511,6 +511,73 @@ def _make_pretrained_vitb_rn50_384(
         enable_attention_hooks=enable_attention_hooks,
     )
 
+def expand_input_conv_to_4ch(conv2d, new_in_channels=4):
+    '''
+    Expands an existing Conv2d from 3 input channels to 4 input channels.
+    Weights for the new channel are randomly initialized (or zero).
+    '''
+    # old_weights shape: [out_channels, 3, kH, kW]
+    old_weights = conv2d.weight.data
+    out_channels, old_in_channels, kH, kW = old_weights.shape
+
+    if old_in_channels == new_in_channels:
+        # Already has 4 channels, do nothing
+        print("Warning: Convolution already has 4 input channels.")
+        return conv2d
+
+    # Create new weight tensor: [out_channels, 4, kH, kW]
+    new_weights = torch.zeros((out_channels, new_in_channels, kH, kW), 
+                              device=old_weights.device)
+
+    # Copy over the original 3 channels
+    new_weights[:, :old_in_channels, :, :] = old_weights
+
+    # Random init for the new (4th) channel
+    nn.init.normal_(new_weights[:, 3:, :, :], std=1e-5)
+
+    # Create a new Conv2d with correct in_channels
+    new_conv = nn.Conv2d(
+        in_channels=new_in_channels,
+        out_channels=out_channels,
+        kernel_size=conv2d.kernel_size,
+        stride=conv2d.stride,
+        padding=conv2d.padding,
+        dilation=conv2d.dilation,
+        groups=conv2d.groups,
+        bias=(conv2d.bias is not None),
+    )
+
+    # Assign the newly created weights
+    new_conv.weight = nn.Parameter(new_weights)
+
+    # If the old conv had a bias, copy it too
+    if conv2d.bias is not None:
+        new_conv.bias = nn.Parameter(conv2d.bias.data.clone())
+
+    return new_conv
+
+
+def _make_pretrained_vitl16_384_4ch(
+    pretrained, use_readout="ignore", hooks=None, enable_attention_hooks=False
+):
+    '''
+    Creates a ViT-L/16 model that accepts 4-channel inputs (RGB + Depth).
+    '''
+    model = timm.create_model("vit_large_patch16_384", pretrained=pretrained)
+
+    # The model above accepts 3 channels, adapt it to accept 4
+    # model.patch_embed.proj is typically the 2D conv for input -> patch embeddings
+    model.patch_embed.proj = expand_input_conv_to_4ch(model.patch_embed.proj, new_in_channels=4)
+
+    hooks = [5, 11, 17, 23] if hooks == None else hooks
+    return _make_vit_b16_backbone(
+        model,
+        features=[256, 512, 1024, 1024],
+        hooks=hooks,
+        vit_features=1024,
+        use_readout=use_readout,
+        enable_attention_hooks=enable_attention_hooks,
+    )
 
 def _make_pretrained_vitl16_384(
     pretrained, use_readout="ignore", hooks=None, enable_attention_hooks=False
@@ -527,6 +594,26 @@ def _make_pretrained_vitl16_384(
         enable_attention_hooks=enable_attention_hooks,
     )
 
+def _make_pretrained_vitb16_384_4ch(
+    pretrained, use_readout="ignore", hooks=None, enable_attention_hooks=False
+):
+    '''
+    Creates a ViT-B/16 model that accepts 4-channel inputs (RGB + Depth).
+    '''
+    model = timm.create_model("vit_base_patch16_384", pretrained=pretrained)
+
+    # The model above accepts 3 channels, adapt it to accept 4
+    # model.patch_embed.proj is typically the 2D conv for input -> patch embeddings
+    model.patch_embed.proj = expand_input_conv_to_4ch(model.patch_embed.proj, new_in_channels=4)
+
+    hooks = [2, 5, 8, 11] if hooks == None else hooks
+    return _make_vit_b16_backbone(
+        model,
+        features=[96, 192, 384, 768],
+        hooks=hooks,
+        use_readout=use_readout,
+        enable_attention_hooks=enable_attention_hooks,
+    )
 
 def _make_pretrained_vitb16_384(
     pretrained, use_readout="ignore", hooks=None, enable_attention_hooks=False
