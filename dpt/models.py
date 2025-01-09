@@ -114,7 +114,7 @@ class DPTDepthModel(DPT):
             self.load(path)
 
     def forward(self, x):
-        inv_depth = super().forward(x).squeeze(dim=1)
+        inv_depth = super().forward(x)#.squeeze(dim=1)
 
         if self.invert:
             depth = self.scale * inv_depth + self.shift
@@ -155,6 +155,17 @@ class DPTDepthCompletion(DPT):
 
         if path is not None:
             self.load(path)
+
+    def forward(self, x):
+        inv_depth = super().forward(x)#.squeeze(dim=1)
+
+        if self.invert:
+            depth = self.scale * inv_depth + self.shift
+            depth[depth < 1e-8] = 1e-8
+            depth = 1.0 / depth
+            return depth
+        else:
+            return inv_depth
 
 class DPTSegmentationModel(DPT):
     def __init__(self, num_classes, path=None, **kwargs):
