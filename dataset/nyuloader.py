@@ -54,9 +54,9 @@ class DataLoader_NYU(Dataset):
         # if (self.add_noise):
         #     depth = self.apply_random_noise(self.depths[index])
 
-        depth = self.preprocess_depth(self.depths[index], self.use_mask, self.add_noise)
+        depth, mask = self.preprocess_depth(self.depths[index], self.use_mask, self.add_noise)
 
-        sample = {'rgb': rgb, 'depth': depth, 'gt': gt, 'k': k}
+        sample = {'rgb': rgb, 'depth': depth, 'gt': gt, 'k': k, 'mask': mask}
         return sample
 
             # sample = {'rgb': rgb, 'depth': self.apply_random_mask(self.depths[index]), 'gt': gt, 'k': k}
@@ -80,18 +80,25 @@ class DataLoader_NYU(Dataset):
         gt = torch.FloatTensor(gt_exp)
         return gt
 
-    def preprocess_depth(self, depth_path, apply_mask, apply_noise):
-        raw_depth = self.get_depth(depth_path)
-
-        mask_path = random.choice(self.masks)
+    def get_mask(self, mask_path):
         mask_raw = np.load(mask_path)
-        
+                
         if mask_raw.shape != (480, 640):
             mask_image = Image.fromarray(mask_raw)
             mask_image = mask_image.resize((640, 480), Image.NEAREST)  # Using nearest neighbor to avoid interpolation of binary values
             mask = np.array(mask_image)
         else:
             mask = mask_raw
+
+        mask = torch.FloatTensor(np.expand_dims(mask, axis=0))
+
+        return mask
+
+    def preprocess_depth(self, depth_path, apply_mask, apply_noise):
+        raw_depth = self.get_depth(depth_path)
+
+        mask_path = random.choice(self.masks)
+        mask = self.get_mask(mask_path)
 
         if apply_noise:
             num_elements = raw_depth.numel()
@@ -109,9 +116,9 @@ class DataLoader_NYU(Dataset):
             depth = raw_depth
 
         if apply_mask:
-            depth = depth * torch.FloatTensor(mask) 
+            depth = depth * mask
         else:
-            num_zeros_in_mask = np.count_nonzero(mask == 0)
+            num_zeros_in_mask = torch.count_nonzero(mask == 0)
             num_elements = depth.numel()
 
             num_points_to_zero = min(num_zeros_in_mask, num_elements)
@@ -121,7 +128,7 @@ class DataLoader_NYU(Dataset):
             flattened_depth[indices] = 0
             depth = flattened_depth.view_as(depth)
 
-        return depth
+        return depth, mask
 
 class DataLoader_NYU_test(Dataset):
     def __init__(self, data_dir, mode, height=640, width=480, tp_min=50):

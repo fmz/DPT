@@ -8,11 +8,10 @@ import copy
 
 from torch.utils.data import DataLoader
 from dataset.nyuloader import DataLoader_NYU
-from dpt.models import DPTDepthCompletion
+from dpt.models import DPTDepthCompletion, DPTDepthModel
 
 from utils import (
     get_optimizer,
-    get_performance,
     save_depth,
     save_checkpoint,
 )
@@ -48,6 +47,31 @@ def calculate_loss_4ch(pred_depth, gt_depth, mask, use_gradient_loss=True):
         # standard masked L1
         return F.l1_loss(pred_depth[mask == 1], gt_depth[mask == 1])
     
+def run_validation(model, val_loader, device_str, use_gradient_loss):
+    device = torch.device(device_str if device_str == 'cuda' and torch.cuda.is_available() else 'cpu')
+
+    model.eval()
+    with torch.no_grad():
+        loss_all = []
+        for batch, data in enumerate(val_loader):
+            # if (batch % 50 == 0 and batch != 0):
+            #     print('Val Batch No. {0}'.format(batch))
+
+            rgb = data['rgb'].to(device)
+            depth = data['depth'].to(device)
+            gt = data['gt'].to(device)
+            mask = data['mask'].to(device)
+            #k = data['k'].to(device)
+
+            input_4ch = torch.cat([rgb, depth], dim=1)  # shape [B, 4, H, W]
+
+            estimated_depth = model(input_4ch)
+            loss = calculate_loss_4ch(pred_depth, gt, mask, use_gradient_loss)
+            loss_all.append(loss.item())
+
+    val_loss = sum(loss_all) / len(loss_all)
+    return val_loss
+
 def train_model(model, 
                 train_loader, 
                 val_loader, 
@@ -88,7 +112,9 @@ def train_model(model,
             input_4ch = torch.cat([rgb, depth], dim=1)  # shape [B, 4, H, W]
 
             optim.zero_grad()
-            pred_depth = model(input_4ch)  # shape [B, 1, H, W]
+            #pred_depth = model(input_4ch)  # shape [B, 1, H, W]
+            pred_depth = model(rgb)  # shape [B, 1, H, W]
+
 
             loss = calculate_loss_4ch(pred_depth, gt, mask, use_gradient_loss)
             loss.backward()
@@ -168,8 +194,9 @@ def get_performance(model, val_loader, device_str, use_gradient_loss=True):
             gt    = data['gt'].to(device)
             mask  = data['mask'].to(device)
 
-            input_4ch = torch.cat([rgb, depth], dim=1)
-            pred_depth = model(input_4ch)
+            # input_4ch = torch.cat([rgb, depth], dim=1)
+            # pred_depth = model(input_4ch)
+            pred_depth = model(rgb)
 
             loss = calculate_loss_4ch(pred_depth, gt, mask, use_gradient_loss)
             loss_vals.append(loss.item())
@@ -187,6 +214,8 @@ if __name__ == "__main__":
     lr_list = [1e-3, 1e-4]
     wd_list = [1e-7, 1e-6]
     patience = 2
+    apply_mask = True
+    add_noise = False
     device_str = 'cuda'
 
     best_val_loss = float('inf')
@@ -199,26 +228,27 @@ if __name__ == "__main__":
         for wd in wd_list:
             # Create Datasets & DataLoaders (NYU example)
             train_dataset = DataLoader_NYU(
-                root_path='/oscar/data/jtompki1/cli277/nyuv2/nyuv2', 
-                split="train", 
-                apply_mask=True, 
-                add_noise=False
+                '/oscar/data/jtompki1/cli277/nyuv2/nyuv2', 
+                "train", 
+                apply_mask, 
+                add_noise
             )
             train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, pin_memory=True)
 
             val_dataset = DataLoader_NYU(
-                root_path='/oscar/data/jtompki1/cli277/nyuv2/nyuv2', 
-                split="val", 
-                apply_mask=True, 
-                add_noise=False
+                '/oscar/data/jtompki1/cli277/nyuv2/nyuv2', 
+                "val", 
+                apply_mask, 
+                add_noise
             )
             val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, pin_memory=True)
 
-            print('Train size: {}, Val size: {}' + str(len(train_loader), str(len(val_loader))))
+            print('Train size: {}, Val size: {}'.format(len(train_loader), len(val_loader)))
             print("Learning Rate: {}, Weight Decay: {}".format(lr, wd))
 
             # Build model
-            model_4ch = DPTDepthCompletion(features=256, non_negative=True)
+            # model_4ch = DPTDepthCompletion(features=256, non_negative=True)
+            model_4ch = DPTDepthModel(features=256, non_negative=True)
             model_4ch = nn.DataParallel(model_4ch)
 
             # Parameter configuration
