@@ -7,6 +7,8 @@ import numpy as np
 import os
 import random
 
+from dpt.transforms import Resize, NormalizeImage, PrepareForNet
+
 class DataLoader_NYU(Dataset):
     def __init__(self, data_dir, mode, use_mask, add_noise, height=480, width=640, tp_min=50):
 
@@ -26,6 +28,9 @@ class DataLoader_NYU(Dataset):
         self.use_mask = use_mask
         self.add_noise = add_noise
 
+
+        self.normalize_rgb = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
         self.k = np.array([[582.62448, 0.0, 313.04476], [0.0, 582.69103, 238.44390], [0.0, 0.0, 1.0]])
 
     def __len__(self):
@@ -35,6 +40,8 @@ class DataLoader_NYU(Dataset):
         return self.get_item(idx)
     
     def get_item(self, index):
+        # Hack to limit trainig set:
+        index = index % 4
         rgb = self.get_rgb(self.rgbs[index])
         depth = self.get_depth(self.lidars[index])
         gt = self.get_gt(self.depths[index])
@@ -66,7 +73,15 @@ class DataLoader_NYU(Dataset):
             # return sample
     
     def get_rgb(self, rgb_path):
-        return torch.FloatTensor(cv2.imread(rgb_path)).permute(2, 0, 1)
+        img = cv2.imread(rgb_path)
+
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) / 255.0
+        img = self.normalize_rgb({"image": img})["image"]
+            
+        return torch.FloatTensor(img).permute(2, 0, 1)
     
     def get_depth(self, depth_path):
         d = np.load(depth_path).reshape(480, 640)

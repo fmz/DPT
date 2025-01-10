@@ -24,6 +24,7 @@ def _make_encoder(
     enable_attention_hooks=False,
     has_depth_input=False,
 ):
+    # breakpoint()
     if backbone == "vitl16_384":
         if (has_depth_input):
                 pretrained = _make_pretrained_vitl16_384_4ch(
