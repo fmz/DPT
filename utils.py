@@ -15,6 +15,11 @@ def save_depth(depth_data, path):
     colored_depth = cv2.applyColorMap(depth_data_8bit, cv2.COLORMAP_INFERNO)
     cv2.imwrite(path, colored_depth)
 
+def save_rgb(rgb_data, path):
+    rgb_normalized = cv2.normalize(rgb_data, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    rgb_normalized = rgb_normalized.transpose((1,2,0))
+    cv2.imwrite(path, rgb_normalized)
+
 def get_performance(model, val_loader, device_str, use_gradient_loss):
     device = torch.device(device_str if device_str == 'cuda' and torch.cuda.is_available() else 'cpu')
     model.to(device)

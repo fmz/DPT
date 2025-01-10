@@ -9,10 +9,12 @@ import copy
 from torch.utils.data import DataLoader
 from dataset.nyuloader import DataLoader_NYU
 from dpt.models import DPTDepthCompletion, DPTDepthModel
+from dpt.transforms import Resize, NormalizeImage, PrepareForNet
 
 from utils import (
     get_optimizer,
     save_depth,
+    save_rgb,
     save_checkpoint,
 )
 
@@ -30,6 +32,8 @@ def gradient_loss(pred_depth, gt_depth, mask):
     pred_dy = torch.abs(pred_depth[:, :, 1:, :] - pred_depth[:, :, :-1, :])
     smoothness = (pred_dx.mean() + pred_dy.mean())
 
+    print(f'l1_loss: {l1_loss}, Smoothness: {smoothness}')
+
     return l1_loss + 0.1 * smoothness  # weigh the smoothness as you see fit
 
 
@@ -45,7 +49,9 @@ def calculate_loss_4ch(pred_depth, gt_depth, mask, use_gradient_loss=True):
         return gradient_loss(pred_depth, gt_depth, mask)
     else:
         # standard masked L1
-        return F.l1_loss(pred_depth[mask == 1], gt_depth[mask == 1])
+        l1_loss = F.l1_loss(pred_depth, gt_depth)
+        print(f'l1_loss: {l1_loss}')
+        return l1_loss
     
 def run_validation(model, val_loader, device_str, use_gradient_loss):
     device = torch.device(device_str if device_str == 'cuda' and torch.cuda.is_available() else 'cpu')
@@ -79,7 +85,7 @@ def train_model(model,
                 parameter, 
                 patience, 
                 device_str, 
-                use_gradient_loss=True):
+                use_gradient_loss=False):
 
     device = torch.device(device_str if device_str == 'cuda' and torch.cuda.is_available() else 'cpu')
     model.to(device)
@@ -93,6 +99,11 @@ def train_model(model,
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim, mode="min", factor=0.1, patience=patience
     )
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            print(name)
+
 
     print('------------------------ Start Training ------------------------')
     t_start = time.time()
@@ -116,14 +127,30 @@ def train_model(model,
             pred_depth = model(rgb)  # shape [B, 1, H, W]
 
 
+            breakpoint()
             loss = calculate_loss_4ch(pred_depth, gt, mask, use_gradient_loss)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             optim.step()
+
+            total_norm = 0
+            
+            ''' Debug '''
+            for p in model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm**0.5
+            print("Gradient norm:", total_norm)
+            ''' '''
 
             num_iteration += 1
             loss_all.append(loss.item())
             epoch_losses.append(loss.item())
             loss_index.append(num_iteration)
+
+
 
             if (batch_idx % max(1, (100 // train_loader.batch_size)) == 0) and batch_idx != 0:
                 print('Batch No. {0} / Loss: {1:.4f}'.format(batch_idx, loss.item()))
@@ -131,10 +158,11 @@ def train_model(model,
                 print('Delta time {0:.4f} seconds'.format(t_end - t_step))
                 t_step = time.time()
 
-                # Save some quick images for debugging
-                save_depth(pred_depth[0, 0].detach().cpu().numpy(), 'tmp/color_output.png')
-                save_depth(depth[0, 0].detach().cpu().numpy(),      'tmp/color_sparse.png')
-                save_depth(gt[0, 0].detach().cpu().numpy(),         'tmp/color_gt.png')
+            # Save some quick images for debugging
+            save_depth(pred_depth[0, 0].detach().cpu().numpy(), 'tmp/color_output.png')
+            save_depth(depth[0, 0].detach().cpu().numpy(),      'tmp/color_sparse.png')
+            save_depth(gt[0, 0].detach().cpu().numpy(),         'tmp/color_gt.png')
+            save_rgb(rgb[0].detach().cpu().numpy(),             'tmp/input_rgb.png')
 
         # End of epoch
         mean_epoch_loss = np.mean(epoch_losses)
@@ -211,7 +239,7 @@ if __name__ == "__main__":
     # Hyperparams
     output_name = "Test_DPT4CH"
     num_train_epoch = 40
-    lr_list = [1e-3, 1e-4]
+    lr_list = [1e-6, 1e-3]
     wd_list = [1e-7, 1e-6]
     patience = 2
     apply_mask = True
@@ -223,6 +251,10 @@ if __name__ == "__main__":
     best_lr = 0
     best_wd = 0
     final_stats = {}
+
+    use_gradient_loss = False
+
+    torch.autograd.set_detect_anomaly(True)
 
     for lr in lr_list:
         for wd in wd_list:
@@ -267,7 +299,7 @@ if __name__ == "__main__":
                 parameter=param_config,
                 patience=patience,
                 device_str=device_str,
-                use_gradient_loss=True
+                use_gradient_loss=use_gradient_loss
             )
 
             # Track best
