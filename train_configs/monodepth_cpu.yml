@@ -1,0 +1,32 @@
+training:
+  data_path: "../datasets/nyuv2"
+
+  batch_size: 1
+  epochs: 10
+
+  optimizer:
+    type: "adam"
+    lr: 1e-5
+    weight_decay: 1e-7
+  
+  lr_scheduler:
+    type: "plateau"
+    mode: "min"
+    factor: 0.5
+    patience: 2
+
+  output_dir: "./checkpoints_dpt"
+  backbone: "vitb16_384"
+  device: "mps"
+  debug: true
+  # Use a standard 640x480 resolution
+  input_width: 640
+  input_height: 480
+
+logging:
+  level: "INFO"
+
+profiling:
+  enable: false
+  steps_to_profile: 5
+  export_trace: "./profile_trace.json"
