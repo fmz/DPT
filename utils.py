@@ -18,6 +18,7 @@ def save_depth(depth_data, path):
 def save_rgb(rgb_data, path):
     rgb_normalized = cv2.normalize(rgb_data, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     rgb_normalized = rgb_normalized.transpose((1,2,0))
+    rgb_normalized = cv2.cvtColor(rgb_normalized, cv2.COLOR_RGB2BGR)
     cv2.imwrite(path, rgb_normalized)
 
 def get_performance(model, val_loader, device_str, use_gradient_loss):
@@ -44,18 +45,35 @@ def get_performance(model, val_loader, device_str, use_gradient_loss):
     val_loss = sum(loss_all) / len(loss_all)
     return val_loss
 
-def save_checkpoint(model, epoch, checkpoint_dir, stats, name):
-    """Save a checkpoint file to `checkpoint_dir`."""
-    state = {
-        "epoch": epoch,
-        "state_dict": model.state_dict(),
-        "stats": stats,
-    }
+def save_checkpoint(
+    model_state_dict,
+    optimizer_state_dict,
+    epoch: int,
+    val_loss: float,
+    save_dir: str,
+    prefix: str = "checkpoint",
+) -> None:
+    """Save a checkpoint with model and optimizer states."""
+    os.makedirs(save_dir, exist_ok=True)
+    filename = f"{prefix}_epoch{epoch}_valloss{val_loss:.4f}.pth"
+    path = os.path.join(save_dir, filename)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state": model_state_dict,
+            "optimizer_state": optimizer_state_dict,
+            "val_loss": val_loss,
+        },
+        path,
+    )
+    print(f"Checkpoint saved: {path}")
 
-    filename = os.path.join(checkpoint_dir, "{}.pth.tar".format(name))
-    torch.save(state, filename)
 
-def get_optimizer(net, optim_type, lr, weight_decay):
+def get_optimizer(net, optim_params):
+    optim_type = optim_params['type']
+    lr = float(optim_params['lr'])
+    weight_decay = float(optim_params['weight_decay'])
+
     if optim_type == 'adam':
         return optimizer.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
     elif optim_type == 'sgd':
@@ -64,6 +82,24 @@ def get_optimizer(net, optim_type, lr, weight_decay):
         return optimizer.RMSprop(net.parameters(), lr=lr, weight_decay=weight_decay, momentum=0.9)
     else:
         raise ValueError("Unsupported optimizer type. Choose 'adam', 'sgd', or 'rmsprop'.")
+
+def get_scheduler(opt, sched_params):
+    scheduler_type = sched_params.get("type", "plateau")
+    if scheduler_type == "plateau":
+        mode     = sched_params.get("mode", "min")
+        factor   = sched_params.get("factor", 0.5)
+        patience = sched_params.get("patience", 2)
+        scheduler = optimizer.lr_scheduler.ReduceLROnPlateau(
+            opt,
+            mode=mode,
+            factor=factor,
+            patience=patience
+        )
+    elif scheduler_type == "cosine":
+        pass
+        #scheduler = optimizer.lr_scheduler.CosineAnnealingLR(...)
+
+    return scheduler
 
 def calculate_loss_multi_resolution(reconstructed_img, target_img, use_gradient_loss):
    
@@ -154,3 +190,11 @@ def calculate_loss(reconstructed_img, target_img, use_gradient_loss):
     loss = F.mse_loss(reconstructed_img, target_img)
     #rmse_loss = torch.sqrt(loss)
     return loss
+
+def torch_pick_device(device_str):
+    if device_str == 'cpu':
+        return torch.device(device_str)
+    if device_str == 'cuda':
+        return torch.device(device_str if torch.cuda.is_available() else "cpu")
+    if device_str == 'mps':
+        return torch.device(device_str if torch.mps.is_available() else "cpu")

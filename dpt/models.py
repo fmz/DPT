@@ -157,7 +157,7 @@ class DPTDepthCompletion(DPT):
             self.load(path)
 
     def forward(self, x):
-        inv_depth = super().forward(x)#.squeeze(dim=1)
+        inv_depth = super().forward(x).squeeze(dim=1)
 
         if self.invert:
             depth = self.scale * inv_depth + self.shift
