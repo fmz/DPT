@@ -1,23 +1,23 @@
 training:
-  data_path: "../datasets/nyuv2"
+  data_path: "/oscar/data/jtompki1/cli277/nyuv2/nyuv2"
 
-  batch_size: 1
-  epochs: 10
+  batch_size: 4
+  epochs: 50
 
   optimizer:
     type: "adam"
-    lr: 1e-5
+    lr: 1e-4
     weight_decay: 1e-7
   
   lr_scheduler:
     type: "plateau"
     mode: "min"
-    factor: 0.5
+    factor: 0.1
     patience: 2
 
   output_dir: "./checkpoints_dpt"
-  backbone: "vitb16_384"
-  device: "mps"
+  backbone: "vitl16_384"
+  device: "cuda"
   debug: true
   # Use a standard 640x480 resolution
   input_width: 640

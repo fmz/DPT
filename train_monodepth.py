@@ -114,14 +114,14 @@ def train_one_epoch(
         if profiler is not None:
             profiler.step()
 
-        if (batch_idx % max(1, (5 // loader.batch_size)) == 0) and batch_idx != 0:
+        if (batch_idx % 10 == 0):
             save_depth(pred_depth[0, 0].detach().cpu().numpy(), 'tmp/color_output.png')
             save_depth(gt_depth[0, 0].detach().cpu().numpy(),     'tmp/color_gt.png')
             save_rgb(rgb[0].detach().cpu().numpy(),          'tmp/input_rgb.png')
 
     avg_loss = total_loss / len(loader)
     t_end = time.time()
-    logging.info(f'[[Epoch {epoch}] Finished in {(t_start - t_end):.2f}s | Average loss: {avg_loss:.4f}')
+    logging.info(f'[Epoch {epoch}] Finished in {(t_start - t_end):.2f}s | Average loss: {avg_loss:.4f}')
 
     return avg_loss
 
@@ -156,10 +156,10 @@ def validate_one_epoch(
 
         pred_depth = model(rgb).unsqueeze(1)
         loss = masked_l1_loss(pred_depth, gt_depth)
-        total_loss =+ loss.item()
+        total_loss += loss.item()
 
         if debug and batch_idx % 10 == 0:
-            logging.debug(f"[Epoch {epoch}] Val Batch {batch_idx}/{len(loader)} => loss {loss.item():.4f}")
+            logging.info(f"[Epoch {epoch}] Val Batch {batch_idx}/{len(loader)} => loss {loss.item():.4f}")
     
     avg_loss = total_loss / len(loader)
     logging.info(f'[Epoch {epoch}] Validation complete | avg_loss={avg_loss:.4f}')
@@ -293,6 +293,8 @@ def main(config_path: str):
             debug=debug,
         )
         scheduler.step(val_loss)
+        logging.info(f'[Epoch {epoch}], prev LR: {scheduler.get_last_lr()}')
+
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
