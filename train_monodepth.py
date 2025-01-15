@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.profiler import profile, record_function, ProfilerActivity
+from torchvision.transforms import Grayscale
 
 from dataset.nyuloader_v2 import NYUDepthDataset
 from dpt.models import DPTDepthModel
@@ -39,10 +40,10 @@ def setup_logger(log_level=logging.INFO):
 
     return logger
 
-
 def masked_l1_loss(
         pred: torch.Tensor,
         target: torch.Tensor,
+        rgb: torch.Tensor = None,
         mask: torch.Tensor = None
 ) -> torch.Tensor:
     """
@@ -50,13 +51,51 @@ def masked_l1_loss(
     pred/target shape: [B, 1, H, W]
     mask shape: [B, 1, H, W] with True=valid.
     """
-    if mask:
+    if mask is not None:
         valid = mask.bool()
         l1_loss = F.l1_loss(pred[valid], target[valid])
     else:
         l1_loss = F.l1_loss(pred, target)
 
-    return l1_loss
+    loss = l1_loss
+
+    if rgb is not None:
+        # Compute gradient loss
+        pred_dx = torch.abs(pred[:, :, :, 9:-8] - pred[:, :, :, 8:-9])
+        pred_dy = torch.abs(pred[:, :, 9:-8, :] - pred[:, :, 8:-9, :])
+
+        rgb_dx = torch.abs(rgb[:, :, :, 9:-8] - rgb[:, :, :, 8:-9])
+        rgb_dy = torch.abs(rgb[:, :, 9:-8, :] - rgb[:, :, 8:-9, :])
+        
+        to_gs = Grayscale(num_output_channels=1)
+        gs_dx = to_gs(rgb_dx)
+        gs_dy = to_gs(rgb_dy)
+
+        err_x = torch.abs(pred_dx - gs_dx)
+        err_y = torch.abs(pred_dy - gs_dy)
+
+        grad_loss = torch.mean(err_x) + torch.mean(err_y)
+        logging.debug(f'Gradient loss: {grad_loss}')
+
+        save_depth(pred_dx[0,0].detach().cpu().numpy(), 'tmp/pred_dx.png')
+        save_depth(pred_dy[0,0].detach().cpu().numpy(), 'tmp/pred_dy.png')
+
+        save_depth(gs_dx[0,0].detach().cpu().numpy(), 'tmp/gs_dx.png')
+        save_depth(gs_dy[0,0].detach().cpu().numpy(), 'tmp/gs_dy.png')
+
+        save_depth(err_x[0,0].detach().cpu().numpy(), 'tmp/err_x.png')
+        save_depth(err_y[0,0].detach().cpu().numpy(), 'tmp/err_y.png')
+
+
+        loss += grad_loss * 0.1 # TODO: un-hardcode weight
+
+    if torch.isinf(loss):
+        logging.error("Infinite loss detected, stopping.")
+        return 0
+    if torch.isnan(loss):
+        logging.error("NaN loss detected, stopping.")
+        return 0
+    return loss
 
 def train_one_epoch(
         model: nn.Module,
@@ -95,13 +134,13 @@ def train_one_epoch(
         if profiler is not None:
             with record_function("train_batch"):
                 pred_depth = model(rgb)
-                loss = masked_l1_loss(pred_depth, gt_depth)
+                loss = masked_l1_loss(pred_depth, gt_depth, rgb)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
         else:
             pred_depth = model(rgb)
-            loss = masked_l1_loss(pred_depth, gt_depth)
+            loss = masked_l1_loss(pred_depth, gt_depth, rgb)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -154,8 +193,8 @@ def validate_one_epoch(
         rgb = data['rgb'].to(device)
         gt_depth = data['gt'].to(device)
 
-        pred_depth = model(rgb).unsqueeze(1)
-        loss = masked_l1_loss(pred_depth, gt_depth)
+        pred_depth = model(rgb)
+        loss = masked_l1_loss(pred_depth, gt_depth, rgb)
         total_loss += loss.item()
 
         if debug and batch_idx % 10 == 0:
@@ -250,7 +289,14 @@ def main(config_path: str):
     best_train_loss = float('inf')
     best_model_state = None
 
+    # Start with the backbone frozen
+    model.freeze_backbone()
+
     for epoch in range(1, training_cfg["epochs"]+1):
+        # Unfreeze backbone at some point
+        if epoch == 8:
+            model.unfreeze_backbone()
+
         # If profiling is enabled, run with pytorch profiler context
         if enable_profiling and epoch == 1:
             with profile(
