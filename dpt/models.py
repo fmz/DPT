@@ -11,7 +11,6 @@ from .blocks import (
     forward_vit,
 )
 
-
 def _make_fusion_block(features, use_bn):
     return FeatureFusionBlock_custom(
         features,
@@ -86,6 +85,14 @@ class DPT(BaseModel):
         out = self.scratch.output_conv(path_1)
 
         return out
+
+    def freeze_backbone(self):
+        for param in self.pretrained.model.parameters():
+            param.requires_grad = False
+
+    def unfreeze_backbone(self):
+        for param in self.pretrained.model.parameters():
+            param.requires_grad = True
 
 
 class DPTDepthModel(DPT):
