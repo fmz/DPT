@@ -26,6 +26,25 @@ from utils import (
     get_scheduler
 )
 
+class SingleBatchDataset(NYUDepthDataset):
+    '''
+    A wrapper that takes a 'real' dataset, but returns only the first item every time.
+    or returns a user-chosen index. 
+    '''
+
+    def __init__(self, real_dataset, index_to_use=0):
+        self.real_dataset = real_dataset
+        self.index_to_use = index_to_use
+
+    def __len__(self):
+        # We can artificially set this to e.g. 100, but it doesn't matter
+        return 100  
+
+    def __getitem__(self, idx):
+        # Always return the same item
+        return self.real_dataset[self.index_to_use]
+        
+
 def setup_logger(log_level=logging.INFO):
     ''' Configure root logger format and level '''
     logger = logging.getLogger()
@@ -59,35 +78,34 @@ def masked_l1_loss(
 
     loss = l1_loss
 
-    if rgb is not None:
-        # Compute gradient loss
-        pred_dx = torch.abs(pred[:, :, :, 9:-8] - pred[:, :, :, 8:-9])
-        pred_dy = torch.abs(pred[:, :, 9:-8, :] - pred[:, :, 8:-9, :])
+    # if rgb is not None:
+    #     # Compute gradient loss
+    #     pred_dx = torch.abs(pred[:, :, :, 9:-8] - pred[:, :, :, 8:-9])
+    #     pred_dy = torch.abs(pred[:, :, 9:-8, :] - pred[:, :, 8:-9, :])
 
-        rgb_dx = torch.abs(rgb[:, :, :, 9:-8] - rgb[:, :, :, 8:-9])
-        rgb_dy = torch.abs(rgb[:, :, 9:-8, :] - rgb[:, :, 8:-9, :])
+    #     rgb_dx = torch.abs(rgb[:, :, :, 9:-8] - rgb[:, :, :, 8:-9])
+    #     rgb_dy = torch.abs(rgb[:, :, 9:-8, :] - rgb[:, :, 8:-9, :])
         
-        to_gs = Grayscale(num_output_channels=1)
-        gs_dx = to_gs(rgb_dx)
-        gs_dy = to_gs(rgb_dy)
+    #     to_gs = Grayscale(num_output_channels=1)
+    #     gs_dx = to_gs(rgb_dx)
+    #     gs_dy = to_gs(rgb_dy)
 
-        err_x = torch.abs(pred_dx - gs_dx)
-        err_y = torch.abs(pred_dy - gs_dy)
+    #     err_x = torch.abs(pred_dx - gs_dx)
+    #     err_y = torch.abs(pred_dy - gs_dy)
 
-        grad_loss = torch.mean(err_x) + torch.mean(err_y)
-        logging.debug(f'Gradient loss: {grad_loss}')
+    #     grad_loss = torch.mean(err_x) + torch.mean(err_y)
+    #     logging.debug(f'Gradient loss: {grad_loss}')
 
-        save_depth(pred_dx[0,0].detach().cpu().numpy(), 'tmp/pred_dx.png')
-        save_depth(pred_dy[0,0].detach().cpu().numpy(), 'tmp/pred_dy.png')
+    #     save_depth(pred_dx[0,0].detach().cpu().numpy(), 'tmp/pred_dx.png')
+    #     save_depth(pred_dy[0,0].detach().cpu().numpy(), 'tmp/pred_dy.png')
 
-        save_depth(gs_dx[0,0].detach().cpu().numpy(), 'tmp/gs_dx.png')
-        save_depth(gs_dy[0,0].detach().cpu().numpy(), 'tmp/gs_dy.png')
+    #     save_depth(gs_dx[0,0].detach().cpu().numpy(), 'tmp/gs_dx.png')
+    #     save_depth(gs_dy[0,0].detach().cpu().numpy(), 'tmp/gs_dy.png')
 
-        save_depth(err_x[0,0].detach().cpu().numpy(), 'tmp/err_x.png')
-        save_depth(err_y[0,0].detach().cpu().numpy(), 'tmp/err_y.png')
+    #     save_depth(err_x[0,0].detach().cpu().numpy(), 'tmp/err_x.png')
+    #     save_depth(err_y[0,0].detach().cpu().numpy(), 'tmp/err_y.png')
 
-
-        loss += grad_loss * 0.1 # TODO: un-hardcode weight
+    #     loss += grad_loss * 0.1 # TODO: un-hardcode weight
 
     if torch.isinf(loss):
         logging.error("Infinite loss detected, stopping.")
@@ -199,7 +217,7 @@ def validate_one_epoch(
 
         if debug and batch_idx % 10 == 0:
             logging.info(f"[Epoch {epoch}] Val Batch {batch_idx}/{len(loader)} => loss {loss.item():.4f}")
-    
+        break
     avg_loss = total_loss / len(loader)
     logging.info(f'[Epoch {epoch}] Validation complete | avg_loss={avg_loss:.4f}')
     
@@ -215,16 +233,16 @@ def main(config_path: str):
 
     # Load YAML config
     with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
     
     # Setup logging
-    log_level_str = config.get("logging", {}).get("level", "INFO").upper()
+    log_level_str = cfg.get("logging", {}).get("level", "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
     setup_logger(log_level)
 
-    logging.info(f'Loaded config from {config_path}: {config}')
+    logging.info(f'Loaded config from {config_path}: {cfg}')
 
-    training_cfg = config['training']
+    training_cfg = cfg['training']
     device_str = training_cfg.get("device", "cpu")
     device = torch_pick_device(device_str)
     logging.info(f'Using device: {device}')
@@ -264,6 +282,24 @@ def main(config_path: str):
         shuffle=False,
         pin_memory=True
     )
+    
+    ### Overfitting stuff
+
+    # Wrap it so we always return item #0
+    single_batch_dataset = SingleBatchDataset(train_dataset, index_to_use=0)
+
+    single_batch_loader = DataLoader(
+        single_batch_dataset,
+        batch_size=1,       # or 2, but keep it small
+        shuffle=False,      # no shuffling
+        num_workers=0,      # reduce concurrency to keep it simple
+        drop_last=False
+    )
+
+    train_loader = single_batch_loader
+    val_loader   = single_batch_loader
+
+    ### End overfitting stuff
 
     # Create model
     model = DPTDepthModel(
@@ -279,7 +315,7 @@ def main(config_path: str):
     scheduler = get_scheduler(optimizer, training_cfg['lr_scheduler'])
 
     # Setup profiler
-    profiling_cfg = config.get("profiling", {})
+    profiling_cfg = cfg.get("profiling", {})
     enable_profiling = profiling_cfg.get("enable", False)
     steps_to_profile = profiling_cfg.get("steps_to_profile", 5)
     export_trace_path = profiling_cfg.get("export_trace", "profile_trace.json")
@@ -294,7 +330,7 @@ def main(config_path: str):
 
     for epoch in range(1, training_cfg["epochs"]+1):
         # Unfreeze backbone at some point
-        if epoch == 8:
+        if epoch == training_cfg['warmup_epochs']:
             model.unfreeze_backbone()
 
         # If profiling is enabled, run with pytorch profiler context
@@ -345,14 +381,14 @@ def main(config_path: str):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_state = copy.deepcopy(model.state_dict())
-            save_checkpoint(
-                model_state_dict=best_model_state,
-                optimizer_state_dict=optimizer.state_dict(),
-                epoch=epoch,
-                val_loss=val_loss,
-                save_dir=training_cfg["output_dir"],
-                prefix="dpt_mono",
-            )
+            # save_checkpoint(
+            #     model_state_dict=best_model_state,
+            #     optimizer_state_dict=optimizer.state_dict(),
+            #     epoch=epoch,
+            #     val_loss=val_loss,
+            #     save_dir=training_cfg["output_dir"],
+            #     prefix="dpt_mono",
+            # )
     # End of training
     logging.info("Training complete.")
     final_model_path = os.path.join(training_cfg["output_dir"], "dpt_final_model.pth")
