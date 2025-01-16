@@ -2,7 +2,8 @@ training:
   data_path: "/oscar/data/jtompki1/cli277/nyuv2/nyuv2"
 
   batch_size: 4
-  epochs: 50
+  epochs: 150
+  warmup_epochs: 5
 
   optimizer:
     type: "adam"
@@ -13,7 +14,7 @@ training:
     type: "plateau"
     mode: "min"
     factor: 0.1
-    patience: 2
+    patience: 1
 
   output_dir: "./checkpoints_dpt"
   backbone: "vitl16_384"
