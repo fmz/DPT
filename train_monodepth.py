@@ -13,9 +13,12 @@ from torch.utils.data import DataLoader
 from torch.profiler import profile, record_function, ProfilerActivity
 from torchvision.transforms import Grayscale
 
+import piqa
+
 from dataset.nyuloader_v2 import NYUDepthDataset
 from dpt.models import DPTDepthModel
-from dpt.transforms import Resize, NormalizeImage, PrepareForNet
+
+from debug import Break
 
 from utils import (
     get_optimizer,
@@ -59,6 +62,8 @@ def setup_logger(log_level=logging.INFO):
 
     return logger
 
+ssim = piqa.SSIM(n_channels=1).cuda()
+
 def masked_l1_loss(
         pred: torch.Tensor,
         target: torch.Tensor,
@@ -70,21 +75,45 @@ def masked_l1_loss(
     pred/target shape: [B, 1, H, W]
     mask shape: [B, 1, H, W] with True=valid.
     """
+    
+    Break.point()
+
+    # Trim unusable parts
+    pred   = pred[:, :, 8:-8, 8:-8]
+    target = target[:, :, 8:-8, 8:-8]
+
     if mask is not None:
         valid = mask.bool()
         l1_loss = F.l1_loss(pred[valid], target[valid])
     else:
         l1_loss = F.l1_loss(pred, target)
 
-    loss = l1_loss
+    logging.info(f"L1 loss = {l1_loss}")
+
+    loss = l1_loss 
+
+    global ssim
+    max_p = pred.max()
+    max_t = target.max()
+    if max_p != 0 and max_t != 0:
+        min_p = pred.min()
+        min_t = target.min()
+        
+        pred_normalized = (pred - min_p) / (max_p - min_p)
+        target_normalized = (target - min_t) / (max_t - min_t)
+        ssim_loss = 1.0 - ssim(pred_normalized, target_normalized)
+        
+        logging.info(f"Relative SSIM loss = {ssim_loss}")
+
+        loss = loss * 0.5 + ssim_loss * 0.5
 
     # if rgb is not None:
     #     # Compute gradient loss
-    #     pred_dx = torch.abs(pred[:, :, :, 9:-8] - pred[:, :, :, 8:-9])
-    #     pred_dy = torch.abs(pred[:, :, 9:-8, :] - pred[:, :, 8:-9, :])
+    #     pred_dx = torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])
+    #     pred_dy = torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :])
 
-    #     rgb_dx = torch.abs(rgb[:, :, :, 9:-8] - rgb[:, :, :, 8:-9])
-    #     rgb_dy = torch.abs(rgb[:, :, 9:-8, :] - rgb[:, :, 8:-9, :])
+    #     rgb_dx = torch.abs(rgb[:, :, :, 1:] - rgb[:, :, :, :-1])
+    #     rgb_dy = torch.abs(rgb[:, :, 1:, :] - rgb[:, :, :-1, :])
         
     #     to_gs = Grayscale(num_output_channels=1)
     #     gs_dx = to_gs(rgb_dx)
@@ -96,16 +125,16 @@ def masked_l1_loss(
     #     grad_loss = torch.mean(err_x) + torch.mean(err_y)
     #     logging.debug(f'Gradient loss: {grad_loss}')
 
-    #     save_depth(pred_dx[0,0].detach().cpu().numpy(), 'tmp/pred_dx.png')
-    #     save_depth(pred_dy[0,0].detach().cpu().numpy(), 'tmp/pred_dy.png')
+        # save_depth(pred_dx[0,0].detach().cpu().numpy(), 'tmp/pred_dx.png')
+        # save_depth(pred_dy[0,0].detach().cpu().numpy(), 'tmp/pred_dy.png')
 
-    #     save_depth(gs_dx[0,0].detach().cpu().numpy(), 'tmp/gs_dx.png')
-    #     save_depth(gs_dy[0,0].detach().cpu().numpy(), 'tmp/gs_dy.png')
+        # save_depth(gs_dx[0,0].detach().cpu().numpy(), 'tmp/gs_dx.png')
+        # save_depth(gs_dy[0,0].detach().cpu().numpy(), 'tmp/gs_dy.png')
 
-    #     save_depth(err_x[0,0].detach().cpu().numpy(), 'tmp/err_x.png')
-    #     save_depth(err_y[0,0].detach().cpu().numpy(), 'tmp/err_y.png')
+        # save_depth(err_x[0,0].detach().cpu().numpy(), 'tmp/err_x.png')
+        # save_depth(err_y[0,0].detach().cpu().numpy(), 'tmp/err_y.png')
 
-    #     loss += grad_loss * 0.1 # TODO: un-hardcode weight
+    #    loss += grad_loss * 0.1 # TODO: un-hardcode weight
 
     if torch.isinf(loss):
         logging.error("Infinite loss detected, stopping.")
@@ -217,7 +246,7 @@ def validate_one_epoch(
 
         if debug and batch_idx % 10 == 0:
             logging.info(f"[Epoch {epoch}] Val Batch {batch_idx}/{len(loader)} => loss {loss.item():.4f}")
-        break
+        
     avg_loss = total_loss / len(loader)
     logging.info(f'[Epoch {epoch}] Validation complete | avg_loss={avg_loss:.4f}')
     
@@ -230,6 +259,8 @@ def main(config_path: str):
     Args:
         config_path (str): Path to the YAML config file.
     '''
+
+    Break.start()
 
     # Load YAML config
     with open(config_path, 'r') as f:
@@ -286,18 +317,18 @@ def main(config_path: str):
     ### Overfitting stuff
 
     # Wrap it so we always return item #0
-    single_batch_dataset = SingleBatchDataset(train_dataset, index_to_use=0)
+    # single_batch_dataset = SingleBatchDataset(train_dataset, index_to_use=0)
 
-    single_batch_loader = DataLoader(
-        single_batch_dataset,
-        batch_size=1,       # or 2, but keep it small
-        shuffle=False,      # no shuffling
-        num_workers=0,      # reduce concurrency to keep it simple
-        drop_last=False
-    )
+    # single_batch_loader = DataLoader(
+    #     single_batch_dataset,
+    #     batch_size=1,       # or 2, but keep it small
+    #     shuffle=False,      # no shuffling
+    #     num_workers=0,      # reduce concurrency to keep it simple
+    #     drop_last=False
+    # )
 
-    train_loader = single_batch_loader
-    val_loader   = single_batch_loader
+    # train_loader = single_batch_loader
+    # val_loader   = single_batch_loader
 
     ### End overfitting stuff
 

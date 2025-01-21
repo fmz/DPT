@@ -14,7 +14,7 @@ training:
     type: "plateau"
     mode: "min"
     factor: 0.1
-    patience: 1
+    patience: 2
 
   output_dir: "./checkpoints_dpt"
   backbone: "vitl16_384"
