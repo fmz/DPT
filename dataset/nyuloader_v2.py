@@ -12,6 +12,56 @@ from torchvision.transforms import v2
 
 from dpt.transforms import Resize, NormalizeImage, PrepareForNet
 
+from cv2.ximgproc import guidedFilter
+
+from utils import save_depth
+
+num_iters = 0
+
+def guided_filter(rgb_img, depth_img, radius=2, eps=1e-3):
+    """
+    Example wrapper if you have an opencv ximgproc guided filter or a custom guided filter code.
+    
+    Args:
+        rgb_img (np.ndarray): The guidance image, shape (H, W, 3) or (H,W) if grayscale
+        depth_img (np.ndarray): The input depth image to refine, shape (H, W)
+        radius (int): Window radius
+        eps (float): Regularization constant
+    Returns:
+        np.ndarray: The refined depth image with sharper edges, shape (H, W)
+    """
+    rgb_img = rgb_img.transpose((1,2,0))
+
+    # guided = guidedFilter(
+    #     guide=rgb_img, 
+    #     src=depth_img, 
+    #     radius=radius, 
+    #     eps=eps
+    # )
+
+    # If not, we can approximate with a joint bilateral filter:
+    guided = cv2.ximgproc.jointBilateralFilter(
+        joint=rgb_img.astype(np.float32),
+        src=depth_img.astype(np.float32),
+        d=2*radius+1,
+        sigmaColor=0.2,
+        sigmaSpace=radius
+    )
+
+
+    # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 2))
+    # # Erode then dilate is called "open"
+    # guided = cv2.morphologyEx(depth_img, cv2.MORPH_OPEN, kernel)
+
+    global num_iters
+    if (num_iters % 50 == 0):
+        num_iters = 0
+        save_depth(depth_img, 'tmp/in_depth_img.png')
+        save_depth(guided, 'tmp/guided_depth_img.png')
+    num_iters += 1
+
+    return guided
+    
 class NYUDepthDataset(Dataset):
     """
     A dataset for NYU-based depth completion or depth estimation tasks.
@@ -123,7 +173,7 @@ class NYUDepthDataset(Dataset):
         gt_path = self.gt_files[index] if index < len(self.gt_files) else None
 
         # 2) Read + transform RGB
-        rgb = self.load_rgb(rgb_path)  # shape: (C,H,W) after transform
+        rgb, rgb_numpy = self.load_rgb(rgb_path)  # shape: (C,H,W) after transform
 
         # 3) Read Lidar depth as a FloatTensor
         depth_sparse = self.load_npy_depth(lidar_path)  # shape: [1,H,W]
@@ -131,7 +181,7 @@ class NYUDepthDataset(Dataset):
         # 4) Possibly read ground-truth
         depth_gt = None
         if gt_path and os.path.isfile(gt_path):
-            depth_gt = self.load_npy_depth(gt_path)  # shape: [1,H,W]
+            depth_gt = self.load_npy_depth(gt_path, rgb_np=rgb_numpy)  # shape: [1,H,W]
 
         # 5) Preprocess Lidar depth (noise, mask)
         depth_sparse, mask = self.preprocess_depth(depth_sparse)
@@ -174,10 +224,11 @@ class NYUDepthDataset(Dataset):
         # "image" is now float32 [H,W,3]
         # We'll keep it as .transpose(2,0,1) done by PrepareForNet
         # So final shape is [3,H,W]
-        rgb_tensor = torch.from_numpy(sample_dict["image"])  # already [C,H,W], float32
-        return rgb_tensor
+        rgb_numpy = sample_dict["image"]
+        rgb_tensor = torch.from_numpy(rgb_numpy)  # already [C,H,W], float32
+        return rgb_tensor, rgb_numpy
 
-    def load_npy_depth(self, path: str) -> torch.FloatTensor:
+    def load_npy_depth(self, path: str, rgb_np: np.array = None) -> torch.FloatTensor:
         """
         Loads a .npy file that contains depth data of shape (H,W).
         Returns a FloatTensor [1,H,W].
@@ -188,8 +239,14 @@ class NYUDepthDataset(Dataset):
         elif arr.ndim == 3:
             # In case it's already (1,H,W) or something
             arr = arr.squeeze(0)  # just to unify
+        
+        if rgb_np is not None:
+            # Apply guided filter
+            arr = guided_filter(rgb_np, arr, radius=5, eps=1e-3)
+       
         # Expand dims
         arr = np.expand_dims(arr, axis=0)  # shape => [1,H,W]
+
         return torch.from_numpy(arr.astype(np.float32))
 
     def resize_depth(self, depth: torch.FloatTensor, new_h: int, new_w: int) -> torch.FloatTensor:
