@@ -1,13 +1,13 @@
-import time
-import copy
-import yaml
-import logging
 import os
 import sys
+import time
+import copy
+import logging
+import yaml
 
 import torch
-import torch.optim as optim
 import torch.nn as nn
+import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -15,11 +15,9 @@ from torchvision.transforms import Grayscale
 
 import piqa
 
+# Local project imports
 from dataset.nyuloader_v2 import NYUDepthDataset
 from dpt.models import DPTDepthModel
-
-from debug import Break
-
 from utils import (
     get_optimizer,
     save_depth,
@@ -29,147 +27,177 @@ from utils import (
     get_scheduler
 )
 
-class SingleBatchDataset(NYUDepthDataset):
-    '''
-    A wrapper that takes a 'real' dataset, but returns only the first item every time.
-    or returns a user-chosen index. 
-    '''
+from debug import Break
 
-    def __init__(self, real_dataset, index_to_use=0):
-        self.real_dataset = real_dataset
-        self.index_to_use = index_to_use
+###############################################################################
+#                        Logging & Misc Setup                                 #
+###############################################################################
 
-    def __len__(self):
-        # We can artificially set this to e.g. 100, but it doesn't matter
-        return 100  
-
-    def __getitem__(self, idx):
-        # Always return the same item
-        return self.real_dataset[self.index_to_use]
-        
 
 def setup_logger(log_level=logging.INFO):
-    ''' Configure root logger format and level '''
+    """
+    Configure the root logger format and level.
+    
+    Args:
+        log_level (int): one of logging.DEBUG, logging.INFO, etc.
+    
+    Returns:
+        logging.Logger: The configured logger instance.
+    """
     logger = logging.getLogger()
+    logger.handlers = []  # Clear existing handlers if re-running in same process
+
     handler = logging.StreamHandler(sys.stdout)
     formatter = logging.Formatter(
         "[%(asctime)s] [%(levelname)s] %(name)s - %(message)s",
         datefmt='%H:%M:%S'
     )
     handler.setFormatter(formatter)
+    
     logger.setLevel(log_level)
     logger.addHandler(handler)
 
     return logger
 
-ssim = piqa.SSIM(n_channels=1).cuda()
 
-def masked_l1_loss(
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        rgb: torch.Tensor = None,
-        mask: torch.Tensor = None
-) -> torch.Tensor:
+###############################################################################
+#                           Loss Functions                                    #
+###############################################################################
+
+class MonoDepthLoss:
     """
-    Masked L1 Loss.
-    pred/target shape: [B, 1, H, W]
-    mask shape: [B, 1, H, W] with True=valid.
+    Monocular Depth Loss that combines:
+      - Masked L1
+      - Optional SSIM-based term (via piqa)
+      - Additional placeholders for advanced terms if desired.
     """
-    
-    Break.point()
+    def __init__(self, device):
+        self.ssim = piqa.SSIM(n_channels=1).to(device)
 
-    # Trim unusable parts
-    pred   = pred[:, :, 8:-8, 8:-8]
-    target = target[:, :, 8:-8, 8:-8]
+    def __call__(self, pred: torch.Tensor, target: torch.Tensor,
+                 rgb: torch.Tensor = None,
+                 mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        Applies a combined loss to the predicted and target depth maps.
 
-    if mask is not None:
-        valid = mask.bool()
-        l1_loss = F.l1_loss(pred[valid], target[valid])
-    else:
-        l1_loss = F.l1_loss(pred, target)
+        Args:
+            pred (torch.Tensor): Predicted depth, shape [B,1,H,W] or [B,H,W].
+            target (torch.Tensor): Ground truth depth, shape [B,1,H,W].
+            rgb (torch.Tensor, optional): Optional RGB image for advanced losses. 
+            mask (torch.Tensor, optional): Binary mask indicating valid depth pixels.
 
-    logging.info(f"L1 loss = {l1_loss}")
+        Returns:
+            torch.Tensor: A scalar loss value.
+        """
+        # Ensure [B,1,H,W]
+        if pred.ndim == 3:
+            pred = pred.unsqueeze(1)
 
-    loss = l1_loss 
+        # (Optional) Crop edges if needed to avoid boundary artifacts
+        pred = pred[:, :, 8:-8, 8:-8]
+        target = target[:, :, 8:-8, 8:-8]
+        if rgb is not None:
+            rgb = rgb[:, :, 8:-8, 8:-8]
 
-    global ssim
-    max_p = pred.max()
-    max_t = target.max()
-    if max_p != 0 and max_t != 0:
-        min_p = pred.min()
-        min_t = target.min()
+        # Masked L1
+        if mask is not None:
+            valid = mask.bool()
+            l1_loss = F.mse_loss(pred[valid], target[valid])
+        else:
+            diff = torch.abs(pred - target)
+
+            # diff_gt_1 = diff.clone()
+            # diff_gt_1[diff < 1.0] = 0
+            # diff_sq = diff_gt_1 * diff_gt_1
+            diff = torch.pow(diff + 1, 3) + diff + 1 # NOT really L1...
+            l1_loss = torch.mean(diff)
+
+        Break.point()
+
+        logging.debug(f'L1 loss: {l1_loss}')
         
-        pred_normalized = (pred - min_p) / (max_p - min_p)
-        target_normalized = (target - min_t) / (max_t - min_t)
-        ssim_loss = 1.0 - ssim(pred_normalized, target_normalized)
+        loss = l1_loss
+
+        # # Combine with SSIM
+        # # We'll do a basic "normalized" approach if pred & target have non-zero ranges
+        # max_p, min_p = pred.max(), pred.min()
+        # max_t, min_t = target.max(), target.min()
+
+        # if max_p > min_p and max_t > min_t:
+        #     pred_norm = (pred - min_p) / (max_p - min_p)
+        #     targ_norm = (target - min_t) / (max_t - min_t)
+
+        #     ssim_loss = 1.0 - self.ssim(pred_norm, targ_norm)
+
+        #     logging.debug(f'SSIM loss: {ssim_loss}')
+
+        #     loss = loss + 0.2 * ssim_loss
+
+        # Perform edge-aware-smoothness loss if rgb is available
+        if rgb is not None:
+            alpha = 10.0
+            # partial derivatives
+            depth_dx = torch.abs(pred[:,:,:,1:] - pred[:,:,:,:-1])
+            depth_dy = torch.abs(pred[:,:,1:,:] - pred[:,:,:-1,:])
+
+            # Convert to grayscale for gradient computation
+            to_gs = Grayscale(num_output_channels=1)
+            avg_rgb = to_gs(rgb)
+            color_dx = torch.abs(avg_rgb[:,:,:,1:] - avg_rgb[:,:,:,:-1])
+            color_dy = torch.abs(avg_rgb[:,:,1:,:] - avg_rgb[:,:,:-1,:])
+
+            # weighting
+            weight_x = torch.exp(-alpha * color_dx)
+            weight_y = torch.exp(-alpha * color_dy)
+
+            # combine
+            loss_x = (depth_dx * weight_x).mean()
+            loss_y = (depth_dy * weight_y).mean()
+            
+            logging.debug(f'edge-aware gradient loss: {loss_x+loss_y}')
+
+            loss = loss + 0.2 * (loss_x + loss_y)
+
+
+        # Check for NaNs or Infs
+        if torch.isinf(loss) or torch.isnan(loss):
+            logging.error("Abnormal loss (Inf or NaN). Returning 0.")
+            return torch.tensor(0.0, device=loss.device)
         
-        logging.info(f"Relative SSIM loss = {ssim_loss}")
+        return loss
 
-        loss = loss * 0.5 + ssim_loss * 0.5
 
-    # if rgb is not None:
-    #     # Compute gradient loss
-    #     pred_dx = torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])
-    #     pred_dy = torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :])
+###############################################################################
+#                    Training & Validation Routines                           #
+###############################################################################
 
-    #     rgb_dx = torch.abs(rgb[:, :, :, 1:] - rgb[:, :, :, :-1])
-    #     rgb_dy = torch.abs(rgb[:, :, 1:, :] - rgb[:, :, :-1, :])
-        
-    #     to_gs = Grayscale(num_output_channels=1)
-    #     gs_dx = to_gs(rgb_dx)
-    #     gs_dy = to_gs(rgb_dy)
-
-    #     err_x = torch.abs(pred_dx - gs_dx)
-    #     err_y = torch.abs(pred_dy - gs_dy)
-
-    #     grad_loss = torch.mean(err_x) + torch.mean(err_y)
-    #     logging.debug(f'Gradient loss: {grad_loss}')
-
-        # save_depth(pred_dx[0,0].detach().cpu().numpy(), 'tmp/pred_dx.png')
-        # save_depth(pred_dy[0,0].detach().cpu().numpy(), 'tmp/pred_dy.png')
-
-        # save_depth(gs_dx[0,0].detach().cpu().numpy(), 'tmp/gs_dx.png')
-        # save_depth(gs_dy[0,0].detach().cpu().numpy(), 'tmp/gs_dy.png')
-
-        # save_depth(err_x[0,0].detach().cpu().numpy(), 'tmp/err_x.png')
-        # save_depth(err_y[0,0].detach().cpu().numpy(), 'tmp/err_y.png')
-
-    #    loss += grad_loss * 0.1 # TODO: un-hardcode weight
-
-    if torch.isinf(loss):
-        logging.error("Infinite loss detected, stopping.")
-        return 0
-    if torch.isnan(loss):
-        logging.error("NaN loss detected, stopping.")
-        return 0
-    return loss
 
 def train_one_epoch(
-        model: nn.Module,
-        loader: DataLoader,
-        optimizer: optim.Optimizer,
-        device: torch.device,
-        epoch: int,
-        debug: bool,
-        profiler=None
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: optim.Optimizer,
+    device: torch.device,
+    epoch: int,
+    loss_fn: MonoDepthLoss,
+    debug: bool = False,
+    profiler=None
 ) -> float:
-    '''
-    Train the model for 1 epoch.
+    """
+    Train the model for a single epoch.
 
     Args:
-        Args:
         model (nn.Module): The DPT depth model.
         loader (DataLoader): Training data loader.
-        optimizer (optim.Optimizer): Optimizer for model.
+        optimizer (optim.Optimizer): Optimizer for the model.
         device (torch.device): GPU or CPU device.
         epoch (int): Current epoch number (for logging).
+        loss_fn (MonoDepthLoss): Custom depth loss function.
         debug (bool): Whether to log debug info.
-        profiler: PyTorch profiler context manager if profiling is enabled.
+        profiler: (optional) PyTorch profiler context manager if profiling is enabled.
 
     Returns:
         float: Average training loss for this epoch.
-    '''
-
+    """
     model.train()
     total_loss = 0.0
     t_start = time.time()
@@ -177,114 +205,169 @@ def train_one_epoch(
     for batch_idx, data in enumerate(loader):
         rgb = data['rgb'].to(device)
         gt_depth = data['gt'].to(device)
+        mask = data.get('mask', None)
+        if mask is not None:
+            mask = mask.to(device)
 
-        if profiler is not None:
+        if profiler:
             with record_function("train_batch"):
                 pred_depth = model(rgb)
-                loss = masked_l1_loss(pred_depth, gt_depth, rgb)
+                loss = loss_fn(pred_depth, gt_depth, rgb=rgb)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
         else:
             pred_depth = model(rgb)
-            loss = masked_l1_loss(pred_depth, gt_depth, rgb)
+            loss = loss_fn(pred_depth, gt_depth, rgb=rgb)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-        
+
         total_loss += loss.item()
 
         if debug and (batch_idx % 10 == 0):
-            logging.info(f'[Epoch {epoch}], Train Batch {batch_idx}/{len(loader)} | Loss: {loss.item():.4f}')
+            logging.info(
+                f"[Epoch {epoch}] Train Batch {batch_idx}/{len(loader)} | "
+                f"Loss: {loss.item():.4f}"
+            )
 
-        if profiler is not None:
+        # Step the profiler each iteration
+        if profiler:
             profiler.step()
 
-        if (batch_idx % 10 == 0):
+        # Quick debug saves every 10 steps
+        if debug and (batch_idx % 10 == 0):
             save_depth(pred_depth[0, 0].detach().cpu().numpy(), 'tmp/color_output.png')
             save_depth(gt_depth[0, 0].detach().cpu().numpy(),     'tmp/color_gt.png')
-            save_rgb(rgb[0].detach().cpu().numpy(),          'tmp/input_rgb.png')
+            save_rgb(rgb[0].detach().cpu().numpy(),               'tmp/input_rgb.png')
 
     avg_loss = total_loss / len(loader)
     t_end = time.time()
-    logging.info(f'[Epoch {epoch}] Finished in {(t_start - t_end):.2f}s | Average loss: {avg_loss:.4f}')
+    logging.info(
+        f"[Epoch {epoch}] Train finished in {t_end - t_start:.2f}s "
+        f"| Average loss: {avg_loss:.4f}"
+    )
 
     return avg_loss
 
+
 @torch.no_grad()
 def validate_one_epoch(
-        model: nn.Module,
-        loader: DataLoader,
-        device: torch.device,
-        epoch: int,
-        debug: bool
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    epoch: int,
+    loss_fn: MonoDepthLoss,
+    debug: bool = False
 ) -> float:
-    '''
+    """
     Validate model for one epoch.
 
     Args:
-        model (nn.Module): The DPT depth model.
+        model (nn.Module): The DPT depth model (in eval mode).
         loader (DataLoader): Validation data loader.
         device (torch.device): GPU or CPU device.
         epoch (int): Current epoch number (for logging).
+        loss_fn (MonoDepthLoss): Custom depth loss function.
         debug (bool): Whether to log debug info.
 
     Returns:
         float: Average validation loss for this epoch.
-
-    '''
+    """
     model.eval()
     total_loss = 0.0
+    t_start = time.time()
 
     for batch_idx, data in enumerate(loader):
         rgb = data['rgb'].to(device)
         gt_depth = data['gt'].to(device)
+        mask = data.get('mask', None)
+        if mask is not None:
+            mask = mask.to(device)
 
         pred_depth = model(rgb)
-        loss = masked_l1_loss(pred_depth, gt_depth, rgb)
+        loss = loss_fn(pred_depth, gt_depth, rgb=rgb)
         total_loss += loss.item()
 
-        if debug and batch_idx % 10 == 0:
-            logging.info(f"[Epoch {epoch}] Val Batch {batch_idx}/{len(loader)} => loss {loss.item():.4f}")
-        
+        if debug and (batch_idx % 10 == 0):
+            logging.info(
+                f"[Epoch {epoch}] Val Batch {batch_idx}/{len(loader)} => "
+                f"Loss {loss.item():.4f}"
+            )
+
     avg_loss = total_loss / len(loader)
-    logging.info(f'[Epoch {epoch}] Validation complete | avg_loss={avg_loss:.4f}')
-    
+    t_end = time.time()
+    logging.info(
+        f"[Epoch {epoch}] Validation finished in {t_end - t_start:.2f}s "
+        f"| avg_loss={avg_loss:.4f}"
+    )
+
     return avg_loss
 
+
+###############################################################################
+#                    Main Training Entry (Pipeline)                           #
+###############################################################################
+
+
+class SingleBatchDataset(NYUDepthDataset):
+    """
+    A wrapper that ensures we always return a single item from the real dataset,
+    effectively enabling a single-batch overfitting scenario if you attach it
+    to a DataLoader.
+    """
+    def __init__(self, real_dataset: NYUDepthDataset, index_to_use=0):
+        super().__init__(
+            data_dir=real_dataset.data_dir,
+            mode=real_dataset.mode,
+            use_mask=real_dataset.use_mask,
+            add_noise=real_dataset.add_noise,
+            height=real_dataset.height,
+            width=real_dataset.width,
+            resize=real_dataset.resize,
+        )
+        self.real_dataset = real_dataset
+        self.index_to_use = index_to_use
+
+    def __len__(self):
+        return 100  # Arbitrarily large, we keep reusing the same sample.
+
+    def __getitem__(self, idx):
+        return self.real_dataset[self.index_to_use]
+
+
 def main(config_path: str):
-    '''
-    Main function for training DPT with a YAML config.
+    """
+    Main function for training or debugging a DPT model with a YAML config.
 
     Args:
         config_path (str): Path to the YAML config file.
-    '''
-
+    """
     Break.start()
 
-    # Load YAML config
+    # 1) Load YAML config
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
-    
-    # Setup logging
+
+    # 2) Setup logging
     log_level_str = cfg.get("logging", {}).get("level", "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
-    setup_logger(log_level)
-
-    logging.info(f'Loaded config from {config_path}: {cfg}')
+    logger = setup_logger(log_level)
+    logger.info(f"Loaded config from {config_path}: {cfg}")
 
     training_cfg = cfg['training']
+
+    # 3) Device & Debug
     device_str = training_cfg.get("device", "cpu")
     device = torch_pick_device(device_str)
-    logging.info(f'Using device: {device}')
-
     debug = bool(training_cfg.get("debug", True))
+    logger.info(f"Using device: {device}")
 
-    # Create Datasets & DataLoaders (NYU example)
+    # 4) Create Dataset & Dataloader
     dataset_path = training_cfg['data_path']
     train_dataset = NYUDepthDataset(
         data_dir=dataset_path,
-        mode="train", 
+        mode="train",
         use_mask=True,
         add_noise=True,
         height=480,
@@ -292,15 +375,15 @@ def main(config_path: str):
         resize=True
     )
     train_loader = DataLoader(
-        train_dataset, 
+        train_dataset,
         batch_size=training_cfg['batch_size'],
         shuffle=True,
-        pin_memory=True,
+        pin_memory=True
     )
 
     val_dataset = NYUDepthDataset(
         data_dir=dataset_path,
-        mode="val", 
+        mode="val",
         use_mask=False,
         add_noise=False,
         height=480,
@@ -313,67 +396,63 @@ def main(config_path: str):
         shuffle=False,
         pin_memory=True
     )
-    
-    ### Overfitting stuff
 
-    # Wrap it so we always return item #0
+    # -------------------------------------------------------------------------
+    # If you want to do single-batch overfit debugging, simply uncomment below:
+    #
     # single_batch_dataset = SingleBatchDataset(train_dataset, index_to_use=0)
+    # train_loader = DataLoader(single_batch_dataset, batch_size=1, shuffle=False)
+    # val_loader   = DataLoader(single_batch_dataset, batch_size=1, shuffle=False)
+    # -------------------------------------------------------------------------
 
-    # single_batch_loader = DataLoader(
-    #     single_batch_dataset,
-    #     batch_size=1,       # or 2, but keep it small
-    #     shuffle=False,      # no shuffling
-    #     num_workers=0,      # reduce concurrency to keep it simple
-    #     drop_last=False
-    # )
-
-    # train_loader = single_batch_loader
-    # val_loader   = single_batch_loader
-
-    ### End overfitting stuff
-
-    # Create model
+    # 5) Create the Model
     model = DPTDepthModel(
         backbone=training_cfg['backbone'],
         non_negative=True,
         invert=False
     )
     model.to(device)
-    #model = model.compile()
 
-    # Setup optimizer and scheduler
+    # 6) Optimizer & Scheduler
     optimizer = get_optimizer(model, training_cfg['optimizer'])
     scheduler = get_scheduler(optimizer, training_cfg['lr_scheduler'])
 
-    # Setup profiler
+    # 7) Profiler Setup
     profiling_cfg = cfg.get("profiling", {})
     enable_profiling = profiling_cfg.get("enable", False)
     steps_to_profile = profiling_cfg.get("steps_to_profile", 5)
     export_trace_path = profiling_cfg.get("export_trace", "profile_trace.json")
 
-    # Training loop
+    # 8) Optionally Freeze the backbone at start
+    freeze_epochs = training_cfg.get('warmup_epochs', 0)
+    model.freeze_backbone()
+    logger.info("Backbone is frozen at the start.")
+
+    # 9) Construct a depth-loss object
+    loss_fn = MonoDepthLoss(device=device)
+
     best_val_loss = float('inf')
     best_train_loss = float('inf')
-    best_model_state = None
 
-    # Start with the backbone frozen
-    model.freeze_backbone()
-
-    for epoch in range(1, training_cfg["epochs"]+1):
-        # Unfreeze backbone at some point
-        if epoch == training_cfg['warmup_epochs']:
+    # -------------------------------------------------------------------------
+    # Training Loop
+    # -------------------------------------------------------------------------
+    for epoch in range(1, training_cfg["epochs"] + 1):
+        # Unfreeze backbone after 'warmup_epochs' if specified
+        if epoch == freeze_epochs + 1:
             model.unfreeze_backbone()
+            logger.info(f"Backbone layers unfrozen at epoch {epoch}")
 
-        # If profiling is enabled, run with pytorch profiler context
+        # Check if we do a profiling pass this epoch
         if enable_profiling and epoch == 1:
             with profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA, ProfilerActivity.XPU],
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 schedule=torch.profiler.schedule(
                     wait=0, warmup=1, active=steps_to_profile, repeat=1
                 ),
-                on_trace_ready=lambda p: p.export_trace_path(export_trace_path),
+                on_trace_ready=lambda p: p.export_chrome_trace(export_trace_path),
                 record_shapes=True,
-                profile_memory=True,
+                profile_memory=True
             ) as prof:
                 train_loss = train_one_epoch(
                     model=model,
@@ -381,37 +460,45 @@ def main(config_path: str):
                     optimizer=optimizer,
                     device=device,
                     epoch=epoch,
+                    loss_fn=loss_fn,
                     debug=debug,
-                    profiler=prof,
+                    profiler=prof
                 )
         else:
-            # No profiler
+            # Standard training epoch
             train_loss = train_one_epoch(
                 model=model,
                 loader=train_loader,
                 optimizer=optimizer,
                 device=device,
                 epoch=epoch,
-                debug=debug,
-                profiler=None,
+                loss_fn=loss_fn,
+                debug=debug
             )
+
         if train_loss < best_train_loss:
             best_train_loss = train_loss
 
+        # Validation
         val_loss = validate_one_epoch(
             model=model,
             loader=val_loader,
             device=device,
             epoch=epoch,
-            debug=debug,
+            loss_fn=loss_fn,
+            debug=debug
         )
+
+        # Step the LR scheduler
         scheduler.step(val_loss)
-        logging.info(f'[Epoch {epoch}], prev LR: {scheduler.get_last_lr()}')
 
+        logging.info(f"[Epoch {epoch}] Previous LR: {scheduler.get_last_lr()}")
 
+        # Track best val
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_state = copy.deepcopy(model.state_dict())
+            # Optionally save checkpoint
             # save_checkpoint(
             #     model_state_dict=best_model_state,
             #     optimizer_state_dict=optimizer.state_dict(),
@@ -420,13 +507,19 @@ def main(config_path: str):
             #     save_dir=training_cfg["output_dir"],
             #     prefix="dpt_mono",
             # )
+
     # End of training
-    logging.info("Training complete.")
+    logger.info("Training complete.")
     final_model_path = os.path.join(training_cfg["output_dir"], "dpt_final_model.pth")
     torch.save(model.state_dict(), final_model_path)
-    logging.info(f"Final model saved to {final_model_path}")
-    logging.info(f"Best training loss: {best_train_loss:.4f}")
-    logging.info(f"Best validation loss: {best_val_loss:.4f}")
+    logger.info(f"Final model saved to {final_model_path}")
+    logger.info(f"Best training loss: {best_train_loss:.4f}")
+    logger.info(f"Best validation loss: {best_val_loss:.4f}")
+
+
+###############################################################################
+#                           Script Entry Point                                #
+###############################################################################
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

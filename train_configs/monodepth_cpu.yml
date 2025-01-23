@@ -3,7 +3,7 @@ training:
 
   batch_size: 4
   epochs: 150
-  warmup_epochs: 5
+  warmup_epochs: 1
 
   optimizer:
     type: "adam"
