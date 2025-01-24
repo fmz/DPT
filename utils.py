@@ -12,7 +12,7 @@ from scipy.ndimage import median_filter
 def save_depth(depth_data, path):
     depth_data_normalized = cv2.normalize(depth_data, None, 0, 255, cv2.NORM_MINMAX)
     depth_data_8bit = depth_data_normalized.astype(np.uint8)
-    colored_depth = cv2.applyColorMap(depth_data_8bit, cv2.COLORMAP_INFERNO)
+    colored_depth = cv2.applyColorMap(depth_data_8bit, cv2.COLORMAP_TURBO)
     cv2.imwrite(path, colored_depth)
 
 def save_rgb(rgb_data, path):
@@ -102,7 +102,7 @@ def get_scheduler(opt, sched_params):
     return scheduler
 
 def calculate_loss_multi_resolution(reconstructed_img, target_img, use_gradient_loss):
-   
+
     loss_all = 0.0
     for img in reconstructed_img:
         img_resized = F.interpolate(img, size=(480, 640), mode='bilinear', align_corners=False)
@@ -168,10 +168,10 @@ def gradient_loss(input_img, predicted_img):
 
     grad_x = gradient_x(diff)
     grad_y = gradient_y(diff)
-    
+
     grad_x_loss = torch.abs(grad_x).mean()
     grad_y_loss = torch.abs(grad_y).mean()
-    
+
     # Sum both losses
     total_loss = grad_x_loss + grad_y_loss
     return total_loss
@@ -181,12 +181,12 @@ def calculate_loss(reconstructed_img, target_img, use_gradient_loss):
     reconstructed_img = reconstructed_img.masked_fill(mask, 0)
 
     if (use_gradient_loss):
-        loss_metric = torch.sqrt(F.mse_loss(reconstructed_img, target_img))      
+        loss_metric = torch.sqrt(F.mse_loss(reconstructed_img, target_img))
         #loss_metric = F.l1_loss(reconstructed_img, target_img)
         loss_gradient = gradient_loss(target_img, reconstructed_img)
 
         return loss_metric * 0.8 + loss_gradient * 0.2
-        
+
     loss = F.mse_loss(reconstructed_img, target_img)
     #rmse_loss = torch.sqrt(loss)
     return loss
