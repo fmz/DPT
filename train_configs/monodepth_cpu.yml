@@ -1,13 +1,15 @@
 training:
-  data_path: "/oscar/data/jtompki1/cli277/nyuv2/nyuv2"
+  data_path: "../../datasets/nyuv2"
+  pretrained_model_path: "./checkpoints_dpt/dpt_large-midas-2f21e586.pt"
+  backbone: "vitl16_384"
 
   batch_size: 4
-  epochs: 150
-  warmup_epochs: 1
+  epochs: 20
+  freeze_backbone_until: 5
 
   optimizer:
     type: "adam"
-    lr: 1e-4
+    lr: 1e-7
     weight_decay: 1e-7
   
   lr_scheduler:
@@ -17,7 +19,7 @@ training:
     patience: 2
 
   output_dir: "./checkpoints_dpt"
-  backbone: "vitl16_384"
+  save_intermediate_models: False
   device: "cuda"
   debug: true
   # Use a standard 640x480 resolution
@@ -25,7 +27,7 @@ training:
   input_height: 480
 
 logging:
-  level: "INFO"
+  level: "DEBUG"
 
 profiling:
   enable: false
